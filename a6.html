@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>星際防衛戰</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; display: grid; place-items: center; overflow: hidden; color: #e8f5ff; background: #050816; font-family: system-ui, sans-serif; }
+        .game { width: min(94vw, 760px); text-align: center; }
+        h1 { margin: 0 0 12px; font-size: clamp(1.4rem, 4vw, 2rem); letter-spacing: .12em; color: #83e8ff; text-shadow: 0 0 18px #22bce7; }
+        .hud { display: flex; justify-content: space-between; padding: 0 4px 10px; color: #b8cee3; font-size: .95rem; }
+        canvas { display: block; width: 100%; height: min(68vh, 560px); border: 1px solid #2c5477; border-radius: 12px; background: #080e25; box-shadow: 0 0 35px #0878a533; touch-action: none; }
+        .hint { margin: 10px 0 0; color: #9fb4c9; font-size: .88rem; }
+        .overlay { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; background: #020614bb; }
+        .dialog { max-width: 420px; padding: 28px; border: 1px solid #43c9ec; border-radius: 16px; background: #0a1530ee; box-shadow: 0 0 35px #15b9e855; }
+        .dialog p { line-height: 1.7; color: #c6d9eb; }
+        button { padding: 11px 24px; border: 0; border-radius: 999px; color: #04111f; background: #71e5ff; font: inherit; font-weight: 750; cursor: pointer; }
+        button:hover { background: white; }
+        .sound-toggle { margin-left: 8px; padding: 3px 9px; font-size: .8rem; }
+        [hidden] { display: none !important; }
+    </style>
+</head>
+<body>
+    <main class="game">
+        <h1>星際防衛戰</h1>
+        <div class="hud"><span>分數：<b id="score">0</b></span><span>生命：<b id="lives">3</b></span><span>最高：<b id="best">0</b></span></div>
+        <canvas id="screen" aria-label="太空射擊遊戲畫面"></canvas>
+        <p class="hint">← → / A D 移動　・　空白鍵射擊　・　手機可拖曳飛船 <button class="sound-toggle" id="soundToggle" type="button" aria-pressed="true">音效：開</button></p>
+    </main>
+    <section class="overlay" id="overlay">
+        <div class="dialog">
+            <h2 id="title">準備出擊！</h2>
+            <p id="message">擊落迎面而來的敵機，別讓它們突破防線。遊戲包含音效，開始後即可遊玩。</p>
+            <button id="start">開始遊戲</button>
+        </div>
+    </section>
+    <script>
+        (() => {
+            const canvas = document.querySelector('#screen');
+            const ctx = canvas.getContext('2d');
+            const overlay = document.querySelector('#overlay');
+            const scoreEl = document.querySelector('#score');
+            const livesEl = document.querySelector('#lives');
+            const bestEl = document.querySelector('#best');
+            const startButton = document.querySelector('#start');
+            const soundToggle = document.querySelector('#soundToggle');
+            const keys = new Set();
+            let width = 0, height = 0, player, shots = [], enemies = [], stars = [];
+            let score = 0, lives = 3, playing = false, lastTime = 0, spawnTimer = 0, audio, soundEnabled = true;
+            let best = Number(localStorage.getItem('space-shooter-best') || 0);
+            bestEl.textContent = best;
+
+            function resize() {
+                const rect = canvas.getBoundingClientRect();
+                const ratio = Math.min(window.devicePixelRatio || 1, 2);
+                width = rect.width; height = rect.height;
+                canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
+                ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+                if (player) player.y = height - 48;
+                stars = Array.from({ length: 75 }, () => ({ x: Math.random() * width, y: Math.random() * height, r: Math.random() * 1.7 + .3, s: Math.random() * 30 + 10 }));
+            }
+            window.addEventListener('resize', resize);
+
+            function tone(freq, duration, type = 'sine', volume = .045, endFreq = freq) {
+                if (!audio || !soundEnabled) return;
+                const osc = audio.createOscillator(), gain = audio.createGain();
+                osc.type = type; osc.frequency.setValueAtTime(freq, audio.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(Math.max(20, endFreq), audio.currentTime + duration);
+                gain.gain.setValueAtTime(volume, audio.currentTime);
+                gain.gain.exponentialRampToValueAtTime(.001, audio.currentTime + duration);
+                osc.connect(gain); gain.connect(audio.destination); osc.start(); osc.stop(audio.currentTime + duration);
+            }
+            soundToggle.addEventListener('click', () => {
+                soundEnabled = !soundEnabled;
+                soundToggle.textContent = `音效：${soundEnabled ? '開' : '關'}`;
+                soundToggle.setAttribute('aria-pressed', String(soundEnabled));
+            });
+            function shoot() {
+                if (!playing || player.cooldown > 0) return;
+                shots.push({ x: player.x, y: player.y - 17 }); player.cooldown = .2;
+                tone(660, .09, 'square', .025, 240);
+            }
+            function newGame() {
+                audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+                if (audio.state === 'suspended') audio.resume();
+                score = 0; lives = 3; shots = []; enemies = []; spawnTimer = 0;
+                player = { x: width / 2, y: height - 48, cooldown: 0 };
+                scoreEl.textContent = score; livesEl.textContent = lives;
+                overlay.hidden = true; playing = true; lastTime = performance.now();
+                requestAnimationFrame(loop);
+            }
+            function endGame() {
+                playing = false;
+                if (score > best) { best = score; localStorage.setItem('space-shooter-best', best); bestEl.textContent = best; }
+                document.querySelector('#title').textContent = '任務結束';
+                document.querySelector('#message').textContent = `本次得分：${score}。整裝待發，再挑戰一次吧！`;
+                startButton.textContent = '再次出擊'; overlay.hidden = false;
+            }
+            function drawShip(x, y) {
+                ctx.save(); ctx.translate(x, y);
+                ctx.fillStyle = '#54dfff'; ctx.shadowColor = '#36cfff'; ctx.shadowBlur = 14;
+                ctx.beginPath(); ctx.moveTo(0, -19); ctx.lineTo(14, 14); ctx.lineTo(0, 8); ctx.lineTo(-14, 14); ctx.closePath(); ctx.fill();
+                ctx.fillStyle = '#f4a261'; ctx.beginPath(); ctx.moveTo(-5, 13); ctx.lineTo(0, 23 + Math.random() * 6); ctx.lineTo(5, 13); ctx.fill(); ctx.restore();
+            }
+            function loop(now) {
+                if (!playing) return;
+                const dt = Math.min((now - lastTime) / 1000, .04); lastTime = now;
+                ctx.clearRect(0, 0, width, height);
+                for (const star of stars) {
+                    star.y += star.s * dt; if (star.y > height) { star.y = 0; star.x = Math.random() * width; }
+                    ctx.fillStyle = `rgba(190,225,255,${.35 + star.r / 3})`; ctx.fillRect(star.x, star.y, star.r, star.r);
+                }
+                const movingLeft = keys.has('ArrowLeft') || keys.has('a') || keys.has('A');
+                const movingRight = keys.has('ArrowRight') || keys.has('d') || keys.has('D');
+                player.x += ((movingRight ? 1 : 0) - (movingLeft ? 1 : 0)) * 300 * dt;
+                player.x = Math.max(18, Math.min(width - 18, player.x));
+                player.cooldown = Math.max(0, player.cooldown - dt);
+                if (keys.has(' ') || keys.has('Space')) shoot();
+                drawShip(player.x, player.y);
+
+                spawnTimer -= dt;
+                if (spawnTimer <= 0) {
+                    enemies.push({ x: 24 + Math.random() * Math.max(1, width - 48), y: -20, r: 13, speed: 75 + Math.random() * 55 + score / 8 });
+                    spawnTimer = Math.max(.32, .9 - score / 450);
+                }
+                ctx.fillStyle = '#ff628c'; ctx.shadowColor = '#ff356c'; ctx.shadowBlur = 12;
+                for (let i = enemies.length - 1; i >= 0; i--) {
+                    const enemy = enemies[i]; enemy.y += enemy.speed * dt;
+                    ctx.beginPath(); ctx.moveTo(enemy.x, enemy.y - enemy.r); ctx.lineTo(enemy.x + enemy.r, enemy.y); ctx.lineTo(enemy.x, enemy.y + enemy.r); ctx.lineTo(enemy.x - enemy.r, enemy.y); ctx.closePath(); ctx.fill();
+                    if (Math.hypot(enemy.x - player.x, enemy.y - player.y) < 25) { enemies.splice(i, 1); lives--; livesEl.textContent = lives; tone(130, .25, 'sawtooth', .07, 45); if (lives <= 0) endGame(); continue; }
+                    if (enemy.y > height + 18) { enemies.splice(i, 1); lives--; livesEl.textContent = lives; if (lives <= 0) endGame(); }
+                }
+                ctx.shadowBlur = 9; ctx.fillStyle = '#ffe082';
+                for (let i = shots.length - 1; i >= 0; i--) {
+                    const shot = shots[i]; shot.y -= 470 * dt;
+                    ctx.fillRect(shot.x - 2, shot.y - 7, 4, 13);
+                    if (shot.y < -12) { shots.splice(i, 1); continue; }
+                    for (let j = enemies.length - 1; j >= 0; j--) {
+                        const enemy = enemies[j];
+                        if (Math.hypot(shot.x - enemy.x, shot.y - enemy.y) < enemy.r + 5) {
+                            shots.splice(i, 1); enemies.splice(j, 1); score += 10; scoreEl.textContent = score;
+                            tone(240, .16, 'triangle', .05, 780); break;
+                        }
+                    }
+                }
+                ctx.shadowBlur = 0;
+                if (playing) requestAnimationFrame(loop);
+            }
+            startButton.addEventListener('click', newGame);
+            window.addEventListener('keydown', event => {
+                if (['ArrowLeft', 'ArrowRight', ' '].includes(event.key)) event.preventDefault();
+                keys.add(event.key);
+                if (event.key === ' ' && !playing) newGame();
+            });
+            window.addEventListener('keyup', event => keys.delete(event.key));
+            canvas.addEventListener('pointermove', event => {
+                if (!playing || event.buttons === 0) return;
+                const rect = canvas.getBoundingClientRect(); player.x = Math.max(18, Math.min(width - 18, event.clientX - rect.left));
+            });
+            canvas.addEventListener('pointerdown', event => {
+                if (!playing) return;
+                const rect = canvas.getBoundingClientRect(); player.x = event.clientX - rect.left; shoot();
+            });
+            resize();
+        })();
+    </script>
+</body>
+</html>
